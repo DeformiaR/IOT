@@ -5,20 +5,23 @@ Servo myServo;  // Create a servo object
 const int trigPin = 9;
 const int echoPin = 8;
 
-Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial1);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial1);  // Fingerprint sensor on Serial1 (Pins 18, 19)
 
 long duration;
 int distance;
-bool authorized = false; // Flag to check if the user is authorized
+bool authorized = false; // Flag to check if the user is authorized locally (by fingerprint sensor)
 bool stopWork = false;   // Flag to check if stop has been triggered
+bool serverAuthorized = false; // New variable to track server authorization from the server
 
 void setup() {
   myServo.attach(11);  // Attach the servo on pin 11
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
 
-  Serial.begin(250000);
-  Serial1.begin(57600); // Baud rate for AS608
+  Serial.begin(115200);  // Communication with the Serial Monitor
+  Serial1.begin(57600);  // Communication with AS608 fingerprint sensor
+  Serial2.begin(115200); // Communication with ESP8266 on Serial2 (Pins 16, 17)
+
   finger.begin(57600);
 
   if (finger.verifyPassword()) {
@@ -30,6 +33,7 @@ void setup() {
 }
 
 void loop() {
+  // Handle Serial inputs for commands (start, stop, enroll)
   if (Serial.available()) {
     String userInput = Serial.readStringUntil('\n');
     userInput.trim();  // Remove any whitespace characters
@@ -53,140 +57,126 @@ void loop() {
     }
   }
 
+  // If the fingerprint is scanned and the system is not stopped
   if (!authorized && !stopWork) {
     Serial.println("Please scan your fingerprint...");
     if (getFingerprintID() == FINGERPRINT_OK) {
-      Serial.println("Fingerprint authorized!");
-      authorized = true;
+      Serial.println("Fingerprint authorized locally!");
+
+      // Send the fingerprint ID to ESP8266 for server authorization
+      Serial2.println(finger.fingerID);  // Send to ESP8266
+
+      // Wait for the ESP8266 to respond with authorization result
+      delay(500);  // Give time for response
+
+      // Buffer to store incoming data
+      String response = "";
+      
+      // Read data until newline '\n' (end of message)
+      while (Serial2.available()) {
+        char incomingChar = Serial2.read();
+        response += incomingChar;  // Append each character to the response
+        if (incomingChar == '\n') break;  // Stop reading when newline is detected
+        delay(10);  // Small delay to ensure the message is fully received
+      }
+
+      response.trim();  // Trim any extra spaces or newline characters
+
+      // Debugging: Print the complete response
+      Serial.print("Response from ESP8266: ");
+      Serial.println(response);
+
+      // Check the full response
+      if (response == "Authorized") {
+        serverAuthorized = true;
+        Serial.println("Server Authorized! Running sonar...");
+        runSonar();  // Run the sonar system if authorized
+        authorized = true;  // Mark as fully authorized only after server response
+      } else if (response == "Unauthorized") {
+        serverAuthorized = false;
+        Serial.println("Server denied access!");
+      } else {
+        Serial.println("Incomplete or incorrect response from ESP8266.");
+      }
     } else {
       Serial.println("Fingerprint not recognized.");
       delay(2000);
     }
   }
-
-  if (authorized && !stopWork) {
-    Serial.println("Starting sonar detection...");
-    // Servo sweep code remains the same
-    for (int pos = 10; pos <= 160; pos += 1) {
-      if (stopWork) break; // Check if stop was requested
-      myServo.write(pos);
-      delay(15);
-      calculateDistance();
-
-      if (distance >= 10 && distance <= 300) {
-        Serial.print(pos);
-        Serial.print(",");
-        Serial.print(distance);
-        Serial.println(".");
-      }
-    }
-
-    for (int pos = 160; pos >= 10; pos -= 1) {
-      if (stopWork) break; // Check if stop was requested
-      myServo.write(pos);
-      delay(15);
-      calculateDistance();
-
-      if (distance >= 10 && distance <= 300) {
-        Serial.print(pos);
-        Serial.print(",");
-        Serial.print(distance);
-        Serial.println(".");
-      }
-    }
-  }
 }
 
-// Function to calculate distance using the HC-SR04 sensor
 void calculateDistance() {
+  // Clear the trigPin by setting it LOW
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
+  
+  // Trigger the ultrasonic pulse by setting trigPin HIGH for 10 microseconds
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
+  
+  // Measure the duration of the echo pulse (in microseconds)
   duration = pulseIn(echoPin, HIGH);
-  distance = duration * 0.034 / 2;
+  
+  // Calculate the distance in centimeters
+  distance = (duration * 0.034) / 2;
+  
+  // Print the calculated distance
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
 }
 
-// Function to get fingerprint ID
-int getFingerprintID() {
-  uint8_t p = finger.getImage();
-  if (p != FINGERPRINT_OK) return p;
 
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK) return p;
+// Function to run sonar system
+void runSonar() {
+  Serial.println("Starting continuous sonar detection...");
 
-  p = finger.fingerFastSearch();
-  if (p == FINGERPRINT_OK) {
-    Serial.print("Found fingerprint ID #");
-    Serial.print(finger.fingerID);
-    Serial.print(" with confidence ");
-    Serial.println(finger.confidence);
-    return FINGERPRINT_OK;
-  } else {
-    return p;
-  }
-}
+  while (!stopWork) {  // Keep sweeping as long as stopWork is false
+    // Sweep from 10 to 160 degrees
+    for (int pos = 10; pos <= 160; pos += 1) {
+      if (stopWork) break;  // Check if stop was requested
+      myServo.write(pos);
+      delay(15);
 
-// Function to enroll a new fingerprint
-void enrollFingerprint() {
-  int id = 1;
+      calculateDistance();  // For now, skip checking distance for simplicity
+      Serial.print("Servo at position: ");
+      Serial.println(pos);
+    }
 
-  // Find the next available ID by checking each ID slot
-  for (id = 1; id < 128; id++) {
-    if (finger.loadModel(id) != FINGERPRINT_OK) {
-      break;  // Use this ID if it's not already in use
+    // Sweep back from 160 to 10 degrees
+    for (int pos = 160; pos >= 10; pos -= 1) {
+      if (stopWork) break;  // Check if stop was requested
+      myServo.write(pos);
+      delay(15);
+
+      calculateDistance();  // For now, skip checking distance for simplicity
+      Serial.print("Servo at position: ");
+      Serial.println(pos);
     }
   }
 
-  if (id == 128) {
-    Serial.println("No available fingerprint slots.");
-    return;  // Exit if all slots are full
-  }
+  Serial.println("Sonar stopped by stop command.");
+}
 
-  Serial.print("Preparing to enroll fingerprint with ID "); 
-  Serial.println(id);
-  Serial.println("Place your finger on the sensor to start enrollment...");
 
-  // Wait for the first finger press
-  int p = waitForFingerPress();
-  if (p != FINGERPRINT_OK) return;
+// Function to get fingerprint ID
+int getFingerprintID() {
+  uint8_t p = finger.getImage();  // Get the fingerprint image
+  if (p != FINGERPRINT_OK) return p;  // Return if there's an error getting the image
 
-  // Convert fingerprint to feature set
-  p = finger.image2Tz(1);
-  if (p != FINGERPRINT_OK) {
-    Serial.println("Failed to convert image to template.");
-    return;
-  }
+  p = finger.image2Tz();  // Convert the image to a fingerprint template
+  if (p != FINGERPRINT_OK) return p;  // Return if there's an error converting
 
-  Serial.println("First image captured. Remove your finger.");
-  delay(2000);  // Wait for the user to remove the finger
-
-  // Wait for the second finger press
-  Serial.println("Place the same finger again.");
-  p = waitForFingerPress();
-  if (p != FINGERPRINT_OK) return;
-
-  // Convert fingerprint to feature set again
-  p = finger.image2Tz(2);
-  if (p != FINGERPRINT_OK) {
-    Serial.println("Failed to convert second image to template.");
-    return;
-  }
-
-  // Create the model
-  p = finger.createModel();
-  if (p != FINGERPRINT_OK) {
-    Serial.println("Failed to create fingerprint model.");
-    return;
-  }
-
-  // Store the model in the database under the determined ID
-  p = finger.storeModel(id);
+  p = finger.fingerFastSearch();  // Search for the fingerprint template in the database
   if (p == FINGERPRINT_OK) {
-    Serial.println("Fingerprint successfully enrolled!");
+    Serial.print("Found fingerprint ID #");
+    Serial.print(finger.fingerID);  // Print the fingerprint ID
+    Serial.print(" with confidence ");
+    Serial.println(finger.confidence);  // Print the confidence level of the match
+    return FINGERPRINT_OK;
   } else {
-    Serial.println("Failed to store fingerprint.");
+    return p;  // Return error if no match is found
   }
 }
 
@@ -205,11 +195,13 @@ void listFingerprintIDs() {
   bool hasFingerprints = false;
 
   Serial.println("Checking all fingerprint slots (ID 1-127)...");
+
+  // Loop through fingerprint slots and print the ID if a fingerprint is enrolled
   for (int id = 1; id < 128; id++) {
     p = finger.loadModel(id);
     if (p == FINGERPRINT_OK) {
-      Serial.print("Fingerprint ID: F"); 
-      Serial.println(id);  // List each valid fingerprint ID
+      Serial.print("Fingerprint ID: ");
+      Serial.println(id);  // Print each valid fingerprint ID
       hasFingerprints = true;
     }
   }
@@ -226,7 +218,7 @@ int waitForFingerPress() {
     p = finger.getImage();
     if (p == FINGERPRINT_NOFINGER) {
       Serial.print(".");
-      delay(500); // Small delay to prevent flooding the serial output
+      delay(500);
     } else if (p == FINGERPRINT_OK) {
       Serial.println("Finger detected.");
     } else {
@@ -234,4 +226,59 @@ int waitForFingerPress() {
     }
   }
   return p;
+}
+
+// Function to enroll a new fingerprint
+void enrollFingerprint() {
+  int id = 1;
+
+  for (id = 1; id < 128; id++) {
+    if (finger.loadModel(id) != FINGERPRINT_OK) {
+      break;  // Use this ID if it's not already in use
+    }
+  }
+
+  if (id == 128) {
+    Serial.println("No available fingerprint slots.");
+    return;
+  }
+
+  Serial.print("Preparing to enroll fingerprint with ID ");
+  Serial.println(id);
+  Serial.println("Place your finger on the sensor to start enrollment...");
+
+  int p = waitForFingerPress();
+  if (p != FINGERPRINT_OK) return;
+
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Failed to convert image to template.");
+    return;
+  }
+
+  Serial.println("First image captured. Remove your finger.");
+  delay(2000);
+
+  Serial.println("Place the same finger again.");
+  p = waitForFingerPress();
+  if (p != FINGERPRINT_OK) return;
+
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Failed to convert second image to template.");
+    return;
+  }
+
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Failed to create fingerprint model.");
+    return;
+  }
+
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Fingerprint successfully enrolled!");
+  } else {
+    Serial.println("Failed to store fingerprint.");
+  }
 }
