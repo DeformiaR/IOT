@@ -12,6 +12,10 @@ int distance;
 bool authorized = false; // Flag to check if the user is authorized locally (by fingerprint sensor)
 bool stopWork = false;   // Flag to check if stop has been triggered
 bool serverAuthorized = false; // New variable to track server authorization from the server
+bool previousAuthorizationStatus = false;  // Initial previous status is unauthorized
+int servoPosition;  // Variable to store the current position of the servo
+
+
 
 void setup() {
   myServo.attach(11);  // Attach the servo on pin 11
@@ -28,7 +32,9 @@ void setup() {
     Serial.println("Fingerprint sensor detected!");
   } else {
     Serial.println("Fingerprint sensor not detected or password mismatch :(");
-    while (1) { delay(1000); }
+    while (1) { 
+      delay(1000); 
+    }
   }
 }
 
@@ -52,12 +58,12 @@ void loop() {
     else if (userInput == "c") {
       clearFingerprintData();  // Clear all fingerprint data
     }
-    else if (userInput == "F") {
+    else if (userInput == "f") {
       listFingerprintIDs();  // List all enrolled fingerprint IDs
     }
   }
 
-  // If the fingerprint is scanned and the system is not stopped
+  // Check if the fingerprint is scanned and the system is not stopped
   if (!authorized && !stopWork) {
     Serial.println("Please scan your fingerprint...");
     if (getFingerprintID() == FINGERPRINT_OK) {
@@ -69,32 +75,34 @@ void loop() {
       // Wait for the ESP8266 to respond with authorization result
       delay(500);  // Give time for response
 
-      // Buffer to store incoming data
-      String response = "";
-      
-      // Read data until newline '\n' (end of message)
+      String response = "";  // Buffer to store incoming data
       while (Serial2.available()) {
         char incomingChar = Serial2.read();
-        response += incomingChar;  // Append each character to the response
+        response += incomingChar;
         if (incomingChar == '\n') break;  // Stop reading when newline is detected
         delay(10);  // Small delay to ensure the message is fully received
       }
 
       response.trim();  // Trim any extra spaces or newline characters
-
-      // Debugging: Print the complete response
       Serial.print("Response from ESP8266: ");
       Serial.println(response);
 
-      // Check the full response
       if (response == "Authorized") {
         serverAuthorized = true;
         Serial.println("Server Authorized! Running sonar...");
-        runSonar();  // Run the sonar system if authorized
-        authorized = true;  // Mark as fully authorized only after server response
+        authorized = true;  // Mark as fully authorized
+
+        // Send "Authorized" status to Processing
+        Serial.println("AUTH:Authorized");
+
       } else if (response == "Unauthorized") {
         serverAuthorized = false;
         Serial.println("Server denied access!");
+        authorized = false;
+
+        // Send "Unauthorized" status to Processing
+        Serial.println("AUTH:Unauthorized");
+
       } else {
         Serial.println("Incomplete or incorrect response from ESP8266.");
       }
@@ -103,7 +111,54 @@ void loop() {
       delay(2000);
     }
   }
+
+  // Only send the authorization status if it has changed
+  if (authorized != previousAuthorizationStatus) {
+    if (authorized) {
+      Serial.println("authorized");
+    } else {
+      Serial.println("unauthorized");
+    }
+    previousAuthorizationStatus = authorized;  // Update the previous status
+  }
+
+  // Now, if the system is authorized and not stopped, run the sonar system
+  if (authorized && !stopWork) {
+    for (int angle = 0; angle <= 180; angle += 1) {
+      myServo.write(angle);  // Move the servo to the current angle
+      delay(30);  // Give the servo time to move to the position
+
+      calculateDistance();  // Call your existing function to calculate the distance
+
+      // Send the angle and distance to Processing in the format "angle:distance"
+      Serial.print(angle);
+      Serial.print(":");
+      Serial.println(distance);
+
+      // Small delay between sweeps
+      delay(10);
+    }
+
+    // Sweep back from 180 to 0 degrees
+    for (int angle = 180; angle >= 0; angle -= 1) {
+      myServo.write(angle);  // Move the servo back to the previous position
+      delay(30);  // Give the servo time to move
+
+      calculateDistance();  // Recalculate the distance for the current angle
+
+      // Send the angle and distance to Processing in the format "angle:distance"
+      Serial.print(angle);
+      Serial.print(":");
+      Serial.println(distance);
+
+      // Small delay between sweeps
+      delay(10);
+    }
+  }
 }
+
+
+
 
 void calculateDistance() {
   // Clear the trigPin by setting it LOW
@@ -121,10 +176,7 @@ void calculateDistance() {
   // Calculate the distance in centimeters
   distance = (duration * 0.034) / 2;
   
-  // Print the calculated distance
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
+  Serial.println(distance);  // Send only the distance value
 }
 
 
